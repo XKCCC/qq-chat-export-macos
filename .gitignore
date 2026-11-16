@@ -1,0 +1,28 @@
+# 本地 QQ 数据与导出产物
+work/
+outputs/
+*.bak
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.plain.db
+*.clean.db
+
+# 密钥、日志、本地状态
+*key*
+*runtime*
+*.log
+*.jsonl
+screens/
+*.app/
+
+# Python / 编辑器噪音
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+venv/
+
+# 本地 agent 会话状态
+.qwen/
