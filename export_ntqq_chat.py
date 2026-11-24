@@ -760,6 +760,13 @@ def write_text(path: Path, rows: list[dict[str, Any]], title: str) -> None:
     lines = [title, f"message_count={len(rows)}", ""]
     for row in rows:
         text = row.get("text") or "[no decodable text]"
+        media_refs = [
+            attachment["local_path"]
+            for attachment in row.get("attachments") or []
+            if attachment.get("local_path")
+        ]
+        if media_refs:
+            text += " " + " ".join(f"-> {ref}" for ref in media_refs)
         self_mark = " self" if row.get("is_self") else ""
         new_mark = " new_after_import_snapshot" if row.get("is_new_after_import_snapshot") else ""
         attachments = ""
