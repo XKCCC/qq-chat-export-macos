@@ -5,7 +5,9 @@ import argparse
 import csv
 import datetime as dt
 import json
+import shutil
 import sqlite3
+import subprocess
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -227,6 +229,149 @@ def human_size(value: int | None) -> str:
         size /= 1024
         index += 1
     return f"{int(size)}{units[index]}" if index == 0 else f"{size:.1f}{units[index]}"
+
+
+MEDIA_SUBDIRS = ("Pic", "Ptt", "Video")
+
+
+def default_media_root() -> Path | None:
+    base = Path.home() / "Library/Containers/com.tencent.qq/Data/Library/Application Support/QQ"
+    for path in sorted(base.glob("nt_qq_*/nt_data")):
+        return path
+    return None
+
+
+def build_media_index(root: Path) -> dict[str, Path]:
+    """Index media files by lowercase full name and stem; Ori (original) wins over Thumb."""
+    index: dict[str, Path] = {}
+
+    def score(path: Path) -> int:
+        return 2 if "Ori" in path.parts else (1 if "Thumb" in path.parts else 0)
+
+    for sub in MEDIA_SUBDIRS:
+        directory = root / sub
+        if not directory.exists():
+            continue
+        for path in directory.rglob("*"):
+            if not path.is_file():
+                continue
+            for key in (path.name.lower(), path.stem.split("_")[0].lower()):
+                old = index.get(key)
+                if old is None or score(path) > score(old):
+                    index[key] = path
+    return index
+
+
+def find_media_file(ref: str | None, root: Path, index: dict[str, Path]) -> Path | None:
+    if not ref:
+        return None
+    candidate = Path(ref)
+    if candidate.is_absolute() and candidate.exists():
+        return candidate
+    relative = root / ref
+    if relative.exists():
+        return relative
+    for key in (candidate.name.lower(), candidate.stem.split("_")[0].lower()):
+        if key and key in index:
+            return index[key]
+    return None
+
+
+def transcode_voice(src: Path) -> Path | None:
+    """Transcode a QQ voice file to .m4a.
+
+    QQ voice .amr files are actually SILK_V3 (magic ``#!SILK_V3``), which
+    afconvert cannot read; decode them with pilk -> wav -> m4a. Real AMR files
+    go straight through afconvert. Returns the m4a path, or None.
+    """
+    m4a = src.with_suffix(".m4a")
+    header = src.read_bytes()[:12]
+    if b"SILK_V3" in header:
+        try:
+            import pilk  # type: ignore
+        except ImportError:
+            return None
+        import wave
+
+        pcm = src.with_suffix(".pcm.tmp")
+        wav = src.with_suffix(".wav.tmp")
+        try:
+            pilk.decode(str(src), str(pcm))
+            with wave.open(str(wav), "wb") as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(2)
+                handle.setframerate(24000)
+                handle.writeframes(pcm.read_bytes())
+            result = subprocess.run(
+                ["afconvert", "-f", "m4af", "-d", "aac", str(wav), str(m4a)],
+                capture_output=True,
+                timeout=60,
+            )
+        except Exception:
+            return None
+        finally:
+            pcm.unlink(missing_ok=True)
+            wav.unlink(missing_ok=True)
+        return m4a if result.returncode == 0 and m4a.exists() else None
+    result = subprocess.run(
+        ["afconvert", "-f", "m4af", "-d", "aac", str(src), str(m4a)],
+        capture_output=True,
+        timeout=60,
+    )
+    return m4a if result.returncode == 0 and m4a.exists() else None
+
+
+def export_media(
+    rows: list[dict[str, Any]],
+    media_dir: Path,
+    media_root: Path,
+    out_dir: Path,
+    transcode_audio: bool = False,
+) -> dict[str, int]:
+    """Copy referenced local media files into media_dir; annotate attachments with local_path."""
+    index = build_media_index(media_root)
+    stats = {"attachments": 0, "copied": 0, "missing": 0}
+    used_names: set[str] = set()
+    for row in rows:
+        for attachment in row.get("attachments") or []:
+            stats["attachments"] += 1
+            src = None
+            for ref in (attachment.get("file_path"), attachment.get("file_name"), attachment.get("thumb_path")):
+                src = find_media_file(ref, media_root, index)
+                if src is not None:
+                    break
+            if src is None:
+                stats["missing"] += 1
+                attachment["media_found"] = False
+                continue
+            timestamp = row.get("timestamp") or 0
+            try:
+                stamp = dt.datetime.fromtimestamp(int(timestamp)).strftime("%Y%m%d_%H%M%S")
+            except Exception:
+                stamp = "00000000_000000"
+            base = f"{stamp}_{src.stem[:16]}{src.suffix.lower()}"
+            name = base
+            serial = 1
+            while name in used_names:
+                serial += 1
+                name = f"{stamp}_{src.stem[:16]}_{serial}{src.suffix.lower()}"
+            used_names.add(name)
+            media_dir.mkdir(parents=True, exist_ok=True)
+            dst = media_dir / name
+            if not dst.exists():
+                shutil.copy2(src, dst)
+            if transcode_audio and dst.suffix.lower() == ".amr":
+                converted = transcode_voice(dst)
+                if converted is not None:
+                    dst = converted
+                    name = converted.name
+            try:
+                attachment["local_path"] = str(dst.relative_to(out_dir))
+            except ValueError:
+                attachment["local_path"] = str(dst)
+            attachment["media_found"] = True
+            stats["copied"] += 1
+    return stats
 
 
 def render_element(message: ProtoMessage) -> tuple[str | None, dict[str, Any] | None]:
@@ -745,6 +890,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keywords", default="", help="Comma-separated keyword list for focused hit files.")
     parser.add_argument("--date", default="", help="Optional YYYY-MM-DD date extract.")
     parser.add_argument("--pre-msg-db", default="", help="Optional pre-import decrypted nt_msg.db for message-id diff.")
+    parser.add_argument("--with-media", action="store_true", help="Copy locally-cached image/voice/video files into <prefix>_media/ and annotate attachments with local_path.")
+    parser.add_argument("--media-root", default="", help="Path to the NTQQ nt_data directory (auto-detected from the QQ container when omitted).")
+    parser.add_argument("--transcode-audio", action="store_true", help="Also convert copied .amr voice files to .m4a via afconvert.")
     return parser
 
 
@@ -767,6 +915,12 @@ def main() -> int:
     prefix = out_dir / args.prefix
 
     rows, chat_name = load_rows(args)
+    if args.with_media:
+        media_root = Path(args.media_root).expanduser().resolve() if args.media_root else default_media_root()
+        if media_root is None or not media_root.exists():
+            raise RuntimeError("--with-media needs a valid nt_data dir (use --media-root)")
+        stats = export_media(rows, out_dir / f"{args.prefix}_media", media_root, out_dir, args.transcode_audio)
+        print(f"media_attachments={stats['attachments']} media_copied={stats['copied']} media_missing={stats['missing']}")
     write_json(prefix.with_name(prefix.name + "_full.json"), rows)
     write_csv(prefix.with_name(prefix.name + "_full.csv"), rows)
     write_text(prefix.with_name(prefix.name + "_full.txt"), rows, f"NTQQ export: {chat_name}")

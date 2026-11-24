@@ -243,7 +243,7 @@ def extract_key(app: Path, work: Path, salts: dict[bytes, str], timeout: int) ->
     deadline = time.time() + timeout
     try:
         while time.time() < deadline:
-            for h in parse_hits(logpath):
+            for h in parse_hits(logfile):
                 salt = h.get("salt", b"")[: h.get("w3", 0)]
                 if salt in salts and h.get("w4") == 4000:
                     p = h.get("pass", b"")[: h.get("w1", 0)]
@@ -355,6 +355,10 @@ def main() -> None:
                     help="your own QQ number (or set QQ_SELF_UIN)")
     ap.add_argument("--out-dir", default=str(HOME / "qq-chat-export"))
     ap.add_argument("--timeout", type=int, default=600, help="seconds to wait for the key")
+    ap.add_argument("--with-media", action="store_true",
+                    help="also copy locally-cached image/voice/video files into <prefix>_media/")
+    ap.add_argument("--transcode-audio", action="store_true",
+                    help="with --with-media: also convert .amr voice files to .m4a")
     ap.add_argument("--keep", action="store_true",
                     help="keep the temp workdir (contains sensitive data!)")
     args = ap.parse_args()
@@ -386,6 +390,10 @@ def main() -> None:
         ]
         if args.self_uin:
             cmd += ["--self-uin", args.self_uin]
+        if args.with_media:
+            cmd += ["--with-media", "--media-root", str(CONTAINER_QQ / nt_hash / "nt_data")]
+            if args.transcode_audio:
+                cmd += ["--transcode-audio"]
         r = run(cmd, timeout=600)
         print(r.stdout.strip())
         if r.returncode != 0:

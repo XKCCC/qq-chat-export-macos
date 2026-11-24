@@ -67,9 +67,17 @@ python3 macos_extract_and_export.py --peer 123456789 --self-uin 你的QQ号
 |---|---|
 | `--peer` | 必填。群号 / 好友 QQ 号 / nt_uid，群或私聊自动判断 |
 | `--self-uin` | 你的 QQ 号（也可用环境变量 `QQ_SELF_UIN`），用于标记哪些消息是你发的 |
+| `--with-media` | 同时导出本机已缓存的图片/语音/视频到 `<前缀>_media/` |
+| `--transcode-audio` | 配合 `--with-media`：把语音转成可直接播放的 .m4a（需要 `pip3 install --user pilk`，QQ 语音是 SILK 编码） |
 | `--out-dir` | 输出目录，默认 `~/qq-chat-export` |
 | `--timeout` | 等密钥的超时秒数，默认 600 |
 | `--keep` | 保留临时工作目录（**含敏感数据**，调试用，用完自己删） |
+
+### 媒体导出说明
+
+- 只能导出**本机已下载过**的媒体文件；从没点开过的图片/语音本机没有缓存，会在统计里计入 `media_missing`
+- 图片优先取原图（Ori），其次缩略图（Thumb）；文件按消息时间重命名，正文附件信息里带 `local_path` 指向媒体文件
+- QQ 语音文件扩展名是 .amr 但实为 SILK_V3 编码；不加 `--transcode-audio` 时保留原文件，加时额外生成 .m4a
 
 ## 输出
 
